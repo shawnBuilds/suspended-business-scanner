@@ -4,8 +4,8 @@ from typing import Any, Dict
 # Controls for toggling tests and defaults
 CONTROLS: Dict[str, Any] = {
     # High-level city selector (change this only to switch cities)
-    "city_name": "Chattanooga",
-    "raw_tab_default": "Chattanooga_Raw",
+    "city_name": "Medellin",
+    "raw_tab_default": "Medellin_Raw",
     # Places-related simple controls kept for keyword/type labeling
     "places_radius_m": 50000,
     "places_keyword": "cafe",
@@ -58,9 +58,27 @@ CONTROLS: Dict[str, Any] = {
     # Area Insights partitioning
     "area_max_places_per_request": 100,
     "area_skip_large_single_type": True,
+    # Fallback: when a single type still exceeds the cap, try the next types
+    # If enabled, the runner will iterate over each type individually and fetch
+    # from the first type whose count <= cap. If none fit, it will skip.
+    "area_enable_single_type_fallback": True,
+    # Shuffle types to vary results across runs
+    # - area_shuffle_types_enable: master toggle
+    # - area_shuffle_types_seed_mode: "daily" | "fixed" | "random"
+    #     * daily: deterministic per (city, UTC date)
+    #     * fixed: use area_shuffle_types_fixed_seed
+    #     * random: non-deterministic each run
+    # - area_shuffle_types_fixed_seed: integer seed used when seed_mode == "fixed"
+    "area_shuffle_types_enable": True,
+    "area_shuffle_types_seed_mode": "daily",
+    "area_shuffle_types_fixed_seed": 12345,
     # Writing controls
     "area_insights_write_enabled": True,
     "area_write_only_closed": True,
+    # Snapshot controls
+    "snapshot_enable": True,  # when True, write CSV snapshot before each city write
+    "snapshot_include_headers": True,  # include headers row in snapshot CSV
+    "snapshot_base_dir": ".",  # base directory for the 'data' folder
     # Cities runner controls
     "cities_run_all": False,  # when True, loop all cities in CITY_PRESETS and write per *_Raw tab
     "cities_list": ["Chattanooga", "Medellin", "Santa Cruz"],

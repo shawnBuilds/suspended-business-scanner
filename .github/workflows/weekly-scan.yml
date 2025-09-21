@@ -1,0 +1,70 @@
+name: Weekly Suspended Business Scan
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: weekly-scan
+  cancel-in-progress: false
+
+jobs:
+  run-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        run: |
+          {
+            echo "PLACES_API_KEY=${{ secrets.PLACES_API_KEY }}";
+            echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}";
+            echo "TYPE=${{ secrets.TYPE }}";
+            echo "PROJECT_ID=${{ secrets.PROJECT_ID }}";
+            echo "PRIVATE_KEY_ID=${{ secrets.PRIVATE_KEY_ID }}";
+            echo "PRIVATE_KEY=${{ secrets.PRIVATE_KEY }}";
+            echo "CLIENT_EMAIL=${{ secrets.CLIENT_EMAIL }}";
+            echo "CLIENT_ID=${{ secrets.CLIENT_ID }}";
+            echo "AUTH_URI=${{ secrets.AUTH_URI }}";
+            echo "TOKEN_URI=${{ secrets.TOKEN_URI }}";
+            echo "AUTH_PROVIDER_X509_CERT_URL=${{ secrets.AUTH_PROVIDER_X509_CERT_URL }}";
+            echo "CLIENT_X509_CERT_URL=${{ secrets.CLIENT_X509_CERT_URL }}";
+            echo "UNIVERSE_DOMAIN=${{ secrets.UNIVERSE_DOMAIN }}";
+            # Optional override for tab
+            if [ -n "${{ secrets.RAW_TAB }}" ]; then echo "RAW_TAB=${{ secrets.RAW_TAB }}"; fi;
+          } > .env
+
+      - name: Run scan
+        run: |
+          python scripts/sbs_cli.py
+
+      - name: Upload snapshot CSVs (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-snapshots
+          path: |
+            data/*.csv
+          if-no-files-found: ignore
+
+

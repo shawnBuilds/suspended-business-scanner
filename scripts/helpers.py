@@ -1,4 +1,7 @@
 from typing import Any, Dict, List
+import random
+import hashlib
+from datetime import datetime, timezone
 
 import os
 import sys
@@ -218,6 +221,43 @@ def select_matching_keywords(place_types: List[str], allowed_types: List[str]) -
         if t in allowed_set:
             ordered_matches.append(t)
     return ",".join(ordered_matches)
+
+
+def shuffled_types(types: List[str], controls: Dict[str, Any]) -> List[str]:
+    """Return a shuffled copy of types based on a deterministic seed.
+
+    - Default seed mode is daily: stable per (city_name, UTC date)
+    - 'fixed' mode uses a provided integer seed
+    - 'random' mode uses a non-deterministic seed each run
+    """
+    if not types:
+        return []
+    if not controls.get("area_shuffle_types_enable", False):
+        return list(types)
+
+    mode = controls.get("area_shuffle_types_seed_mode", "daily")
+    seed_value: int
+    if mode == "fixed":
+        try:
+            seed_value = int(controls.get("area_shuffle_types_fixed_seed") or 0)
+        except Exception:
+            seed_value = 0
+    elif mode == "random":
+        seed_bytes = os.urandom(8)
+        seed_value = int.from_bytes(seed_bytes, byteorder="big", signed=False)
+    else:  # daily
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        city = controls.get("city_name", "") or ""
+        key = f"{city}|{today}"
+        digest = hashlib.md5(key.encode("utf-8")).digest()
+        seed_value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+    rng = random.Random(seed_value)
+    out = list(types)
+    rng.shuffle(out)
+    if controls.get("area_log_summary"):
+        print(f"[AreaInsights][Types] Shuffled order={out}")
+    return out
 
 
 def extract_place_id(place: Dict[str, Any]) -> str | None:

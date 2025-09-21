@@ -1,0 +1,2 @@
+place_id,name,business_status,business_address,lat,lng,types,rating,user_ratings_total,keyword,grid_lat,grid_lng
+test_place_001,Test Cafe,OPERATIONAL,"123 Test St, Chattanooga, TN",35.0456,-85.3097,"cafe,food,point_of_interest,establishment",4.5,12,"suspended businesses scan",35.05,-85.31

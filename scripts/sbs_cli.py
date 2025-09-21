@@ -4,7 +4,15 @@ import json
 from typing import Any, Dict, List
 
 import gspread
+import os
+
+# Ensure project root is on sys.path so 'scripts.*' imports work when run directly
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.dirname(_CURRENT_DIR)
+if _PARENT_DIR not in sys.path:
+    sys.path.insert(0, _PARENT_DIR)
 from scripts.config import CONTROLS, CITY_PRESETS
+from scripts.json_to_csv import save_city_snapshot
 from scripts.helpers import (
     apply_city_preset,
     load_env_or_exit,
@@ -47,7 +55,13 @@ def run_area_insights(values: Dict[str, str]) -> None:
         types = [fallback_type]
         if CONTROLS.get("area_log_summary"):
             print(f"[AreaInsights] Using type fallback includedTypes={types}")
-    type_filter = {"includedTypes": types}
+    # Optional shuffle of types
+    try:
+        from scripts.helpers import shuffled_types as _shuffled_types
+        ordered_types = _shuffled_types(types, CONTROLS)
+    except Exception:
+        ordered_types = list(types)
+    type_filter = {"includedTypes": ordered_types}
 
     # If mode == count, iterate statuses and log counts
     aimode = CONTROLS.get("area_insights_mode", "count")
@@ -84,11 +98,14 @@ def run_area_insights(values: Dict[str, str]) -> None:
     ]
     # Reflight with counts to respect 100-place cap
     max_per = int(CONTROLS.get("area_max_places_per_request", 100))
-    # Start with the full type list; progressively reduce if counts exceed cap
+    # Start with the full type list; progressively reduce if counts exceed cap.
+    # If enabled, when reduced to a single overflowing type, try the next single type as fallback.
     working_types: List[str] = list(type_filter.get("includedTypes", []))
+    original_types: List[str] = list(working_types)
     place_insights: List[Dict[str, Any]] = []
-    while working_types:
-        # 1) count
+    fetched = False
+    while working_types and not fetched:
+        # 1) count for current set of types
         count_data = area_insights_compute(
             values,
             insights=["INSIGHT_COUNT"],
@@ -128,13 +145,64 @@ def run_area_insights(values: Dict[str, str]) -> None:
             place_insights = data.get("placeInsights") or []
             if CONTROLS.get("area_log_summary"):
                 print(f"[AreaInsights][Places] returned={len(place_insights)} for types={working_types}")
+            fetched = True
             break
 
         # count_val > max_per → reduce the types list and retry
-        if len(working_types) == 1 and CONTROLS.get("area_skip_large_single_type", True):
-            if CONTROLS.get("area_log_summary"):
-                print(f"[AreaInsights][Count] single type {working_types[0]} exceeds {max_per}; skipping fetch")
-            break
+        if len(working_types) == 1:
+            if CONTROLS.get("area_skip_large_single_type", True):
+                if CONTROLS.get("area_log_summary"):
+                    print(f"[AreaInsights][Count] single type {working_types[0]} exceeds {max_per}; skipping fetch")
+                # Try fallback if enabled: iterate over remaining single types in original order
+                if CONTROLS.get("area_enable_single_type_fallback"):
+                    if CONTROLS.get("area_log_summary"):
+                        print("[AreaInsights][Count] Trying next available single-type fallbacks")
+                    for t in original_types:
+                        if t == working_types[0]:
+                            continue
+                        # count for fallback single type
+                        fb_count = area_insights_compute(
+                            values,
+                            insights=["INSIGHT_COUNT"],
+                            location_filter=location_filter,
+                            type_filter={"includedTypes": [t]},
+                            operating_status=operating_status,
+                        )
+                        if "_error" in fb_count:
+                            err = fb_count["_error"]
+                            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
+                            continue
+                        fb_count_str = fb_count.get("count") or "0"
+                        try:
+                            fb_val = int(fb_count_str)
+                        except Exception:
+                            fb_val = 0
+                        if CONTROLS.get("area_log_summary"):
+                            print(f"[AreaInsights][Count] types={[t]} count={fb_val}")
+                        if fb_val == 0:
+                            continue
+                        if fb_val <= max_per:
+                            data = area_insights_compute(
+                                values,
+                                insights=["INSIGHT_PLACES"],
+                                location_filter=location_filter,
+                                type_filter={"includedTypes": [t]},
+                                operating_status=operating_status,
+                            )
+                            if "_error" in data:
+                                err = data["_error"]
+                                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
+                                continue
+                            place_insights = data.get("placeInsights") or []
+                            if CONTROLS.get("area_log_summary"):
+                                print(f"[AreaInsights][Places] returned={len(place_insights)} for types={[t]}")
+                            fetched = True
+                            break
+                        else:
+                            if CONTROLS.get("area_log_summary"):
+                                print(f"[AreaInsights][Count] single type {t} exceeds {max_per}; skipping fetch")
+                break
+            # If not skipping large single type, we would have fetched above; fall through
         # Drop half of the types (last half) and retry
         drop_n = max(1, len(working_types) // 2)
         working_types = working_types[:-drop_n]
@@ -235,6 +303,17 @@ def run_area_insights(values: Dict[str, str]) -> None:
     if not unique_rows:
         print("[AreaInsights] No new unique rows to append (deduped).")
         return
+
+    # Snapshot pending write for this city before appending
+    if bool(CONTROLS.get("snapshot_enable", True)):
+        try:
+            headers = required_headers() if bool(CONTROLS.get("snapshot_include_headers", True)) else None
+            base_dir = CONTROLS.get("snapshot_base_dir") or "."
+            snap_path = save_city_snapshot(CONTROLS.get("city_name", "City"), unique_rows, headers=headers, base_dir=base_dir)
+            if CONTROLS.get("area_log_summary"):
+                print(f"[Snapshot] Wrote CSV snapshot before append: {snap_path}")
+        except Exception as e:
+            print(f"[Snapshot][Warning] Failed to write snapshot: {e}")
 
     ws.append_rows(unique_rows, value_input_option="RAW")
     print(f"[AreaInsights] Appended {len(unique_rows)} new rows to '{CONTROLS['raw_tab_default']}'.")
