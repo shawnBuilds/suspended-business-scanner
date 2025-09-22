@@ -1,160 +1,133 @@
 ## Goal
 
-Set up a GitHub Actions scheduler so the scan runs automatically on a weekly schedule (and can also be run on-demand with one click). The workflow should install dependencies, load credentials from secrets into a .env, execute `scripts/sbs_cli.py`, and write results to Google Sheets.
+After each scheduled run, send a short summary + Sheet link via email and WhatsApp. Recipients are managed in the Google Sheet (no code changes needed when people change).
 
-## Prerequisites
+## Recipient source (in Google Sheet)
 
-- Repository permissions to manage Actions and Secrets.
-- Google Cloud service account with Sheets/Drive access to the target spreadsheet.
-- The following repository Secrets created (names are suggestions; update if you prefer different names):
-  - PLACES_API_KEY
-  - SPREADSHEET_ID
-  - TYPE (normally `service_account`)
-  - PROJECT_ID
-  - PRIVATE_KEY_ID
-  - PRIVATE_KEY (store with `\n` escaped newlines)
-  - CLIENT_EMAIL
-  - CLIENT_ID
-  - AUTH_URI
-  - TOKEN_URI
-  - AUTH_PROVIDER_X509_CERT_URL
-  - CLIENT_X509_CERT_URL
-  - UNIVERSE_DOMAIN (optional; default `googleapis.com`)
+- Create a tab: `Config_Recipients`
+- Columns (row 1 headers):
+  - `name`
+  - `email_address`
+  - `whatsapp_number` (E.164 format, e.g., `+14155550123`)
+- Add or remove recipients by editing this tab. No redeploy needed.
 
-Tip: PRIVATE_KEY must be pasted with literal `\n` sequences (not real newlines). The code converts `\n` back to newlines internally.
+## Scheduler behavior (high level)
 
-## Time settings (cron)
+1) Run scans for all configured cities.
+2) Compute “new this week” counts per city.
+3) Build a single summary message (see template below).
+4) Read recipients from `Config_Recipients`.
+5) Send the message by Email and WhatsApp.
+6) Log success/failure per recipient in workflow logs.
 
-- GitHub Actions `schedule` uses cron in UTC.
-- Examples:
-  - Every Monday at 13:00 UTC: `0 13 * * 1`
-  - Every Wednesday at 02:30 UTC: `30 2 * * 3`
-  - Hourly during testing: `0 * * * *`
-  - Every 15 minutes during testing: `*/15 * * * *`
+## Message template
 
-Note: Schedules are not guaranteed to run at the exact second and can be delayed. Keep that in mind for short test intervals.
+- Subject (email): `New suspended businesses this week`
+- Body (email & WhatsApp):
 
-## Key functions of the scheduler
+  Hey team,
 
-- Triggers per cron (`on.schedule`) and on-demand (`workflow_dispatch`).
-- Creates a Python environment and installs `requirements.txt`.
-- Materializes a `.env` file from Secrets so the code runs without modifications.
-- Executes `scripts/sbs_cli.py` with your configured controls (e.g., `cities_run_all`, chosen city/tab).
-- Optional: uploads snapshot CSVs from the `data/` directory as build artifacts for auditing.
-- Uses concurrency to prevent overlapping runs.
+  Here’s how many new businesses we’ve found in each city:
 
-## Implementation steps
+  - {new_chatt} in Chattanooga
+  - {new_medellin} in Medellín
+  - {new_santacruz} in Santa Cruz
 
-1) Create the workflow file
+  Check out the details in this sheet: {sheet_link}
 
-Create `.github/workflows/weekly-scan.yml` with the following content (adjust schedule as needed):
+  (If zero new anywhere, still send: “No new closures”.)
 
-```yaml
-name: Weekly Suspended Business Scan
+## Email (SendGrid)
 
-on:
-  schedule:
-    # Every Monday at 13:00 UTC
-    - cron: '0 13 * * 1'
-  workflow_dispatch: {}
+- Use a transactional email service (simpler on Actions than Gmail OAuth).
+- Suggested: SendGrid (free tier is enough). Alternatives: Mailgun, AWS SES.
+- Create an API key, add repository secret: `SENDGRID_API_KEY`.
+- Add `FROM_EMAIL` secret (e.g., `no-reply@yourdomain` or your own email).
+- Send one email to all recipients (To list or BCC list).
 
-concurrency:
-  group: weekly-scan
-  cancel-in-progress: false
+## WhatsApp (Twilio)
 
-jobs:
-  run-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+- MVP/dev: Twilio WhatsApp Sandbox
+  - Quick to start; each recipient must join the sandbox once (via Twilio-provided code in the console).
+  - Required secrets: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` (e.g., `whatsapp:+14155238886`).
+- Production: Twilio WhatsApp Business (or WhatsApp Cloud API by Meta)
+  - Requires a WhatsApp Business number and approved message templates.
+  - Swap credentials but keep the same send interface in code.
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+## GitHub Actions secrets to add
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+- Already present: `PLACES_API_KEY`, service-account pieces, `SPREADSHEET_ID`.
+- Email:
+  - `SENDGRID_API_KEY`
+  - `FROM_EMAIL`
+- WhatsApp (Twilio):
+  - `TWILIO_ACCOUNT_SID`
+  - `TWILIO_AUTH_TOKEN`
+  - `TWILIO_WHATSAPP_FROM`
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+## Implementation steps (code)
 
-      - name: Create .env from secrets
-        run: |
-          {
-            echo "PLACES_API_KEY=${{ secrets.PLACES_API_KEY }}";
-            echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}";
-            echo "TYPE=${{ secrets.TYPE }}";
-            echo "PROJECT_ID=${{ secrets.PROJECT_ID }}";
-            echo "PRIVATE_KEY_ID=${{ secrets.PRIVATE_KEY_ID }}";
-            echo "PRIVATE_KEY=${{ secrets.PRIVATE_KEY }}";
-            echo "CLIENT_EMAIL=${{ secrets.CLIENT_EMAIL }}";
-            echo "CLIENT_ID=${{ secrets.CLIENT_ID }}";
-            echo "AUTH_URI=${{ secrets.AUTH_URI }}";
-            echo "TOKEN_URI=${{ secrets.TOKEN_URI }}";
-            echo "AUTH_PROVIDER_X509_CERT_URL=${{ secrets.AUTH_PROVIDER_X509_CERT_URL }}";
-            echo "CLIENT_X509_CERT_URL=${{ secrets.CLIENT_X509_CERT_URL }}";
-            echo "UNIVERSE_DOMAIN=${{ secrets.UNIVERSE_DOMAIN }}";
-            # Optional override for tab
-            if [ -n "${{ secrets.RAW_TAB }}" ]; then echo "RAW_TAB=${{ secrets.RAW_TAB }}"; fi;
-          } > .env
+1) Add recipient reader
+   - In `scripts/sheets.py`, add `get_recipients(sh, tab_name="Config_Recipients") -> List[dict]` returning dicts with `name`, `email_address`, `whatsapp_number` (skip blank/incomplete rows).
 
-      - name: Run scan
-        run: |
-          python scripts/sbs_cli.py
+2) Track when rows are added (to compute “new this week”)
+   - Add a new column to appended rows: `added_at_utc` (ISO 8601, e.g., `2025-09-21T07:42:00Z`).
+   - Update `required_headers()` in `scripts/sheets.py` and the row mapping in `scripts/helpers.py` so the timestamp is appended for new writes.
+   - For existing rows without timestamps, treat them as “not new this week”.
 
-      - name: Upload snapshot CSVs (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: data-snapshots
-          path: |
-            data/*.csv
-          if-no-files-found: ignore
-```
+3) Compute weekly new counts per city
+   - Add `compute_new_this_week_counts(client) -> Dict[str,int]` that:
+     - Opens the spreadsheet via `SPREADSHEET_ID`.
+     - For each city’s `*_Raw` tab (from `CITY_PRESETS`), counts rows with `added_at_utc` within the current ISO week (UTC).
+     - Returns counts keyed by city name.
 
-2) Verify controls
+4) Build message text
+   - Add `build_summary_message(counts: Dict[str,int], sheet_link: str) -> (subject, text)` that renders the template above.
 
-- In `scripts/config.py` set the desired city (or enable `cities_run_all`) and ensure `area_insights_enable=True`.
-- To limit write impact during testing, you can set `"area_insights_write_enabled": False` temporarily.
+5) Email + WhatsApp senders
+   - Create `scripts/notify.py`:
+     - `send_email_sendgrid(api_key, from_email, to_emails, subject, body_text)`
+     - `send_whatsapp_twilio(account_sid, auth_token, from_whatsapp, to_whatsapp_list, body_text)`
+   - Both should raise on hard errors and log per-recipient success/failure.
 
-3) Add repository secrets
+6) Integrate into the runner
+   - In `scripts/sbs_cli.py`, after scans complete:
+     - Compute counts via step 3.
+     - Read recipients via step 1.
+     - Build message via step 4.
+     - Send Email (if `SENDGRID_API_KEY` present) and WhatsApp (if Twilio secrets present).
+     - Always log a concise summary of what was attempted and outcomes.
 
-- Populate all required secrets listed in Prerequisites.
-- For the PRIVATE_KEY, replace actual newlines with `\n` before saving.
+7) Workflow: include secrets in `.env`
+   - Update `.github/workflows/weekly-scan.yml` “Create .env from secrets” step to include:
+     - `SENDGRID_API_KEY`, `FROM_EMAIL`
+     - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`
 
-4) Commit and push
+## Testing plan
 
-- Commit the workflow file to the default branch (usually `main`). Scheduled triggers run against the default branch.
+1) Sheet prep
+   - Add your email and a WhatsApp test number to `Config_Recipients`.
+   - Ensure the service account has edit access to the spreadsheet.
 
-## Testing the scheduler
+2) Twilio sandbox
+   - In the Twilio console, copy the WhatsApp sandbox join instructions.
+   - Each test recipient must join the sandbox once (send the code to the Twilio sandbox number).
 
-Option A — Manual runs (recommended for quick tests)
-- Open the repository’s Actions tab.
-- Select “Weekly Suspended Business Scan”.
-- Click “Run workflow” to trigger `workflow_dispatch` any time.
+3) Dry-run content
+   - Leave `area_insights_write_enabled=True` to generate real appends (includes `added_at_utc`).
+   - Or add a temporary control `notify_send_even_if_zero=True` to force-send the summary even when counts are zero (for end-to-end notification testing).
 
-Option B — Short test schedule
-- Temporarily change the cron to `*/15 * * * *` (every 15 minutes) and push to the default branch.
-- Observe runs for ~30–60 minutes, then restore the weekly cron.
+4) Trigger runs
+   - Use Actions → “Weekly Suspended Business Scan” → Run workflow for immediate testing.
+   - Or set cron to every 5 minutes during testing: `*/5 * * * *` (UTC) and push; allow ~5–10 minutes for triggers.
 
-Option C — Dry-run without writing
-- Set `"area_insights_write_enabled": False` in `scripts/config.py` to avoid modifying Sheets while verifying logs.
-- Alternatively, set `RAW_TAB` as a temporary secret for a test tab.
+5) Verify
+   - Email arrives from `FROM_EMAIL` with the summary.
+   - WhatsApp message received from `TWILIO_WHATSAPP_FROM`.
+   - Sheet tabs updated with new rows and `added_at_utc` populated.
 
-## Operational notes
+## Notes
 
-- Cron is evaluated in UTC. If you need a specific local time, convert to UTC and consider DST shifts.
-- Scheduled jobs can be delayed by several minutes.
-- Use `concurrency` to prevent overlapping runs if a prior job is still executing when the next trigger fires.
-- Artifacts step is optional but helpful to archive the generated CSV snapshots under `data/` for auditing.
-
-
+- Keep recipients in the sheet to avoid code changes for stakeholder updates.
+- For production WhatsApp, migrate from Sandbox to Business (Meta approval and templates). Reuse the same `notify.py` interface and swap credentials.
+- All timestamps and weekly computations should use UTC to align with GitHub Actions cron.

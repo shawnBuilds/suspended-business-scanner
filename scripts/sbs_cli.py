@@ -23,6 +23,7 @@ from scripts.helpers import (
     select_matching_keywords,
 )
 from scripts.sheets import ensure_worksheet, required_headers, assert_raw_tab_or_exit, get_existing_place_ids, run_test_append_dummy_row
+from scripts.send_email import send_weekly_summary_email
 
 
 def run_area_insights(values: Dict[str, str]) -> None:
@@ -349,6 +350,54 @@ def main() -> None:
 
     if CONTROLS.get("area_insights_enable"):
         run_area_insights(values)
+
+    # Optional: isolated email test
+    if bool(CONTROLS.get("notify_email_test_enable")):
+        try:
+            client = authorize_client(values)
+            sh = client.open_by_key(spreadsheet_id)
+        except Exception as e:
+            print(f"[EmailTest] Failed to open spreadsheet: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Determine recipients: controls override -> Recipients sheet
+        to_emails = CONTROLS.get("notify_email_test_to_emails") or []
+        if not to_emails:
+            try:
+                from scripts.sheets import get_recipients
+                rows = get_recipients(sh, "Recipients")
+                to_emails = [r.get("email_address") for r in rows if r.get("email_address")]
+            except Exception as e:
+                print(f"[EmailTest] Failed to read recipients: {e}", file=sys.stderr)
+                to_emails = []
+        if not to_emails:
+            print("[EmailTest] No email recipients found; aborting test.")
+            return
+
+        counts = CONTROLS.get("notify_email_test_counts") or {
+            "Chattanooga": 0,
+            "Medellin": 0,
+            "Santa Cruz": 0,
+        }
+        sheet_link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+
+        api_key = values.get("SENDGRID_API_KEY") or ""
+        from_email = values.get("FROM_EMAIL") or ""
+        if not api_key or not from_email:
+            print("[EmailTest] Missing SENDGRID_API_KEY or FROM_EMAIL in .env", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            send_weekly_summary_email(
+                api_key=api_key,
+                from_email=from_email,
+                to_emails=to_emails,
+                counts=counts,
+                sheet_link=sheet_link,
+            )
+            print(f"[EmailTest] Sent test summary email to {len(to_emails)} recipient(s).")
+        except Exception as e:
+            print(f"[EmailTest] Failed to send: {e}", file=sys.stderr)
 
     # Deprecated tests are disabled
 

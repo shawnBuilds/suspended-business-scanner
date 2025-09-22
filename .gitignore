@@ -33,3 +33,5 @@ secrets/
 # Node (if any tooling later)
 node_modules/
 
+# notes
+TODO.md

@@ -59,3 +59,48 @@ def run_test_append_dummy_row(client: gspread.Client, spreadsheet_id: str, tab_n
     print(f"[append_dummy_row] Appended row to '{tab_name}' in spreadsheet {spreadsheet_id}.")
 
 
+# Recipients utilities
+def get_recipients(spreadsheet: gspread.Spreadsheet, tab_name: str = "Recipients") -> List[Dict[str, str]]:
+    """Read recipients from a worksheet.
+
+    Expects header row with: name, email_address, whatsapp_number
+    Returns a list of dicts with those keys. Skips blank or incomplete rows.
+    """
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        print(f"[Recipients] Worksheet '{tab_name}' not found.", file=sys.stderr)
+        return []
+    try:
+        values = ws.get_all_values()
+    except Exception:
+        return []
+    if not values:
+        return []
+    headers = [h.strip().lower() for h in (values[0] or [])]
+    idx = {h: i for i, h in enumerate(headers)}
+    required = ["name", "email_address", "whatsapp_number"]
+    for r in required:
+        if r not in idx:
+            print(f"[Recipients] Missing header '{r}' in '{tab_name}'.", file=sys.stderr)
+            return []
+    rows: List[Dict[str, str]] = []
+    for raw in values[1:]:
+        try:
+            name = (raw[idx["name"]] or "").strip()
+            email = (raw[idx["email_address"]] or "").strip()
+            whatsapp = (raw[idx["whatsapp_number"]] or "").strip()
+        except Exception:
+            continue
+        if not name and not email and not whatsapp:
+            continue
+        if not email and not whatsapp:
+            # Require at least one contact method
+            continue
+        rows.append({
+            "name": name,
+            "email_address": email,
+            "whatsapp_number": whatsapp,
+        })
+    return rows
+
