@@ -40,6 +40,8 @@ jobs:
           {
             echo "PLACES_API_KEY=${{ secrets.PLACES_API_KEY }}";
             echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}";
+            echo "SENDGRID_API_KEY=${{ secrets.SENDGRID_API_KEY }}";
+            echo "FROM_EMAIL=${{ secrets.FROM_EMAIL }}";
             echo "TYPE=${{ secrets.TYPE }}";
             echo "PROJECT_ID=${{ secrets.PROJECT_ID }}";
             echo "PRIVATE_KEY_ID=${{ secrets.PRIVATE_KEY_ID }}";
