@@ -5,13 +5,13 @@ from typing import Any, Dict
 CONTROLS: Dict[str, Any] = {
     # === High-priority gates (main switches) ===
     # Enable Area Insights (computeInsights) end-to-end
-    "area_insights_enable": False,
+    "area_insights_enable": True,
     # Run all configured cities vs a single city preset
-    "cities_run_all": False,
+    "cities_run_all": True,
     # Send a test summary email without requiring a full scan
-    "notify_email_test_enable": True,
+    "notify_email_test_enable": False,
     # Send email automatically after successful sheet write
-    "notify_email_after_write_enable": False,
+    "notify_email_after_write_enable": True,
     # === City selection & runner scope ===
     # High-level city selector (change this only to switch cities)
     "city_name": "Medellin",
