@@ -92,7 +92,7 @@ def build_summary_email_message(counts: Dict[str, int],
         "body_text",
         "Hey team,\n\nHere’s how many new businesses we’ve found in each city:\n\n"
         "- {new_chatt} in Chattanooga\n- {new_medellin} in Medellín\n- {new_santacruz} in Santa Cruz\n\n"
-        "Check out the details in this sheet: {sheet_link}\n\n(If zero new anywhere, still send: No new closures)",
+        "Check out the details in this sheet: {sheet_link}",
     )
     body_text = render_text(
         body_template,

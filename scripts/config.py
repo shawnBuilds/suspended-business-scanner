@@ -5,12 +5,13 @@ from typing import Any, Dict
 CONTROLS: Dict[str, Any] = {
     # === High-priority gates (main switches) ===
     # Enable Area Insights (computeInsights) end-to-end
-    "area_insights_enable": False,
+    "area_insights_enable": True,
     # Run all configured cities vs a single city preset
-    "cities_run_all": False,
+    "cities_run_all": True,
     # Send a test summary email without requiring a full scan
     "notify_email_test_enable": False,
-
+    # Send email automatically after successful sheet write
+    "notify_email_after_write_enable": True,
     # === City selection & runner scope ===
     # High-level city selector (change this only to switch cities)
     "city_name": "Medellin",
@@ -60,10 +61,13 @@ CONTROLS: Dict[str, Any] = {
         "OPERATING_STATUS_TEMPORARILY_CLOSED",
     ],
     # Pacing and caps
-    "area_insights_overall_max": 500,
+    "area_insights_overall_max": 300,
     "area_details_pause_secs": 0.1,
     # Partitioning / reductions
     "area_max_places_per_request": 100,
+    # When enabled, iterate each single type and accumulate all batches
+    # whose count is <= area_max_places_per_request
+    "area_enable_gather_all_types": True,
     "area_skip_large_single_type": True,
     # Fallback: when a single type still exceeds the cap, try the next types
     # If enabled, the runner will iterate over each type individually and fetch
@@ -94,7 +98,11 @@ CONTROLS: Dict[str, Any] = {
     "places_keyword": "cafe",
     "places_type": None,
 
-    # === Notifications (email test only) ===
+    # === Notifications ===
+
+    # Optional explicit recipients for the post-write email; if empty, read from 'Recipients' sheet
+    "notify_email_after_write_to_emails": [],
+    # Email test only
     # Optional explicit recipients for test; if empty, will read from 'Recipients' sheet
     "notify_email_test_to_emails": [],
     # Dummy counts for test email when not computing real ones yet

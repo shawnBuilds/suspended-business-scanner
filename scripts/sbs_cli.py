@@ -21,12 +21,14 @@ from scripts.helpers import (
     area_insights_compute,
     map_place_to_row,
     select_matching_keywords,
+    find_place_insights_under_cap,
+    gather_all_under_cap_across_types,
 )
-from scripts.sheets import ensure_worksheet, required_headers, assert_raw_tab_or_exit, get_existing_place_ids, run_test_append_dummy_row
+from scripts.sheets import ensure_worksheet, required_headers, assert_raw_tab_or_exit, get_existing_place_ids, run_test_append_dummy_row, get_recipients
 from scripts.send_email import send_weekly_summary_email
 
 
-def run_area_insights(values: Dict[str, str]) -> None:
+def compute_area_insights_rows(values: Dict[str, str]) -> List[List[Any]]:
     # Build location filter
     mode = CONTROLS.get("area_insights_location_mode", "circle")
     if mode == "circle":
@@ -41,7 +43,7 @@ def run_area_insights(values: Dict[str, str]) -> None:
         }
     else:
         print(f"[AreaInsights] Unsupported location mode '{mode}' in this runner.")
-        return
+        return []
 
     # Type filter (required by API). Fallbacks: places_type → places_keyword → ["restaurant"]
     types = CONTROLS.get("area_insights_types")
@@ -90,125 +92,33 @@ def run_area_insights(values: Dict[str, str]) -> None:
                 print(f"[AreaInsights][Count] {st}={results[st]}")
         if CONTROLS.get("area_log_summary"):
             print("[AreaInsights][Count] summary={" + ", ".join([f"{k}:{results[k]}" for k in statuses]) + "}")
-        return
+        return []
 
     # mode == places: fetch IDs, then fetch details and optionally write
     operating_status = CONTROLS.get("area_insights_operating_status") or [
         "OPERATING_STATUS_PERMANENTLY_CLOSED",
         "OPERATING_STATUS_TEMPORARILY_CLOSED",
     ]
-    # Reflight with counts to respect 100-place cap
+    # Reflight with counts to respect cap and get place insights using helpers
     max_per = int(CONTROLS.get("area_max_places_per_request", 100))
-    # Start with the full type list; progressively reduce if counts exceed cap.
-    # If enabled, when reduced to a single overflowing type, try the next single type as fallback.
     working_types: List[str] = list(type_filter.get("includedTypes", []))
-    original_types: List[str] = list(working_types)
-    place_insights: List[Dict[str, Any]] = []
-    fetched = False
-    while working_types and not fetched:
-        # 1) count for current set of types
-        count_data = area_insights_compute(
-            values,
-            insights=["INSIGHT_COUNT"],
+    # Choose strategy: gather-all vs single-batch-under-cap
+    if bool(CONTROLS.get("area_enable_gather_all_types", False)):
+        place_insights = gather_all_under_cap_across_types(
+            values=values,
             location_filter=location_filter,
-            type_filter={"includedTypes": working_types},
+            included_types=working_types,
             operating_status=operating_status,
+            max_per=max_per,
         )
-        if "_error" in count_data:
-            err = count_data["_error"]
-            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
-            break
-        count_str = count_data.get("count") or "0"
-        try:
-            count_val = int(count_str)
-        except Exception:
-            count_val = 0
-        if CONTROLS.get("area_log_summary"):
-            print(f"[AreaInsights][Count] types={working_types} count={count_val}")
-
-        if count_val == 0:
-            # Nothing for this set; stop
-            break
-
-        if count_val <= max_per:
-            # 2) fetch places for this set
-            data = area_insights_compute(
-                values,
-                insights=["INSIGHT_PLACES"],
-                location_filter=location_filter,
-                type_filter={"includedTypes": working_types},
-                operating_status=operating_status,
-            )
-            if "_error" in data:
-                err = data["_error"]
-                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
-                break
-            place_insights = data.get("placeInsights") or []
-            if CONTROLS.get("area_log_summary"):
-                print(f"[AreaInsights][Places] returned={len(place_insights)} for types={working_types}")
-            fetched = True
-            break
-
-        # count_val > max_per → reduce the types list and retry
-        if len(working_types) == 1:
-            if CONTROLS.get("area_skip_large_single_type", True):
-                if CONTROLS.get("area_log_summary"):
-                    print(f"[AreaInsights][Count] single type {working_types[0]} exceeds {max_per}; skipping fetch")
-                # Try fallback if enabled: iterate over remaining single types in original order
-                if CONTROLS.get("area_enable_single_type_fallback"):
-                    if CONTROLS.get("area_log_summary"):
-                        print("[AreaInsights][Count] Trying next available single-type fallbacks")
-                    for t in original_types:
-                        if t == working_types[0]:
-                            continue
-                        # count for fallback single type
-                        fb_count = area_insights_compute(
-                            values,
-                            insights=["INSIGHT_COUNT"],
-                            location_filter=location_filter,
-                            type_filter={"includedTypes": [t]},
-                            operating_status=operating_status,
-                        )
-                        if "_error" in fb_count:
-                            err = fb_count["_error"]
-                            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
-                            continue
-                        fb_count_str = fb_count.get("count") or "0"
-                        try:
-                            fb_val = int(fb_count_str)
-                        except Exception:
-                            fb_val = 0
-                        if CONTROLS.get("area_log_summary"):
-                            print(f"[AreaInsights][Count] types={[t]} count={fb_val}")
-                        if fb_val == 0:
-                            continue
-                        if fb_val <= max_per:
-                            data = area_insights_compute(
-                                values,
-                                insights=["INSIGHT_PLACES"],
-                                location_filter=location_filter,
-                                type_filter={"includedTypes": [t]},
-                                operating_status=operating_status,
-                            )
-                            if "_error" in data:
-                                err = data["_error"]
-                                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
-                                continue
-                            place_insights = data.get("placeInsights") or []
-                            if CONTROLS.get("area_log_summary"):
-                                print(f"[AreaInsights][Places] returned={len(place_insights)} for types={[t]}")
-                            fetched = True
-                            break
-                        else:
-                            if CONTROLS.get("area_log_summary"):
-                                print(f"[AreaInsights][Count] single type {t} exceeds {max_per}; skipping fetch")
-                break
-            # If not skipping large single type, we would have fetched above; fall through
-        # Drop half of the types (last half) and retry
-        drop_n = max(1, len(working_types) // 2)
-        working_types = working_types[:-drop_n]
-        if CONTROLS.get("area_log_summary"):
-            print(f"[AreaInsights][Count] Reducing types; retry with {working_types}")
+    else:
+        place_insights = find_place_insights_under_cap(
+            values=values,
+            location_filter=location_filter,
+            included_types=working_types,
+            operating_status=operating_status,
+            max_per=max_per,
+        )
 
     # Fetch details up to overall max
     details: List[Dict[str, Any]] = []
@@ -231,8 +141,8 @@ def run_area_insights(values: Dict[str, str]) -> None:
 
     # Write closed places to sheet
     if not details:
-        print("[AreaInsights] No details fetched; nothing to write.")
-        return
+        print("[AreaInsights] No details fetched; nothing to prepare.")
+        return []
 
     # Optionally print a few sample details
     sample_n = int(CONTROLS.get("area_log_details_sample_count", 0) or 0)
@@ -262,7 +172,7 @@ def run_area_insights(values: Dict[str, str]) -> None:
     # Map and append to Sheets when configured
     # Use intersection between each place's types and the allowed types for more specific keywords
     allowed_types = list(types)
-    rows = []
+    rows: List[List[Any]] = []
     write_only_closed = bool(CONTROLS.get("area_write_only_closed", True))
     for p in details:
         if write_only_closed:
@@ -274,21 +184,25 @@ def run_area_insights(values: Dict[str, str]) -> None:
         rows.append(map_place_to_row(p, specific_kw, None, None))
     if not rows:
         print("[AreaInsights] No rows prepared.")
-        return
-    # Write to sheet if spreadsheet_id and a default tab are available
-    spreadsheet_id = values.get("SPREADSHEET_ID")
-    if not spreadsheet_id:
-        print("[AreaInsights] Missing SPREADSHEET_ID; skipping write.")
-        return
+        return []
+    return rows
+
+
+def write_rows_to_sheet(values: Dict[str, str], spreadsheet_id: str, city_name: str, tab_title: str, rows: List[List[Any]]) -> int:
+    if not rows:
+        return 0
     if not bool(CONTROLS.get("area_insights_write_enabled", True)):
         print(f"[AreaInsights] Write disabled by control. Prepared {len(rows)} rows.")
-        return
+        return 0
+    if not spreadsheet_id:
+        print("[AreaInsights] Missing SPREADSHEET_ID; skipping write.")
+        return 0
+    assert_raw_tab_or_exit(tab_title)
 
     client = authorize_client(values)
     sh = client.open_by_key(spreadsheet_id)
-    ws = ensure_worksheet(sh, CONTROLS["raw_tab_default"], required_headers())
+    ws = ensure_worksheet(sh, tab_title, required_headers())
 
-    # Deduplicate: skip rows where place_id already exists in sheet
     existing_ids = get_existing_place_ids(ws)
     unique_rows: List[List[Any]] = []
     seen_batch: set[str] = set()
@@ -303,21 +217,78 @@ def run_area_insights(values: Dict[str, str]) -> None:
 
     if not unique_rows:
         print("[AreaInsights] No new unique rows to append (deduped).")
-        return
+        return 0
 
-    # Snapshot pending write for this city before appending
     if bool(CONTROLS.get("snapshot_enable", True)):
         try:
             headers = required_headers() if bool(CONTROLS.get("snapshot_include_headers", True)) else None
             base_dir = CONTROLS.get("snapshot_base_dir") or "."
-            snap_path = save_city_snapshot(CONTROLS.get("city_name", "City"), unique_rows, headers=headers, base_dir=base_dir)
+            snap_path = save_city_snapshot(city_name, unique_rows, headers=headers, base_dir=base_dir)
             if CONTROLS.get("area_log_summary"):
                 print(f"[Snapshot] Wrote CSV snapshot before append: {snap_path}")
         except Exception as e:
             print(f"[Snapshot][Warning] Failed to write snapshot: {e}")
 
     ws.append_rows(unique_rows, value_input_option="RAW")
-    print(f"[AreaInsights] Appended {len(unique_rows)} new rows to '{CONTROLS['raw_tab_default']}'.")
+    appended_n = len(unique_rows)
+    print(f"[AreaInsights] Appended {appended_n} new rows to '{tab_title}'.")
+    return appended_n
+
+
+def run_all_cities(values: Dict[str, str], spreadsheet_id: str) -> None:
+    # Optional: run for all configured cities, compute first, then write once per city
+    city_names = CONTROLS.get("cities_list") or list(CITY_PRESETS.keys())
+    counts_by_city: Dict[str, int] = {c: 0 for c in city_names}
+    prepared_rows_by_city: Dict[str, List[List[Any]]] = {}
+    for city in city_names:
+        CONTROLS["city_name"] = city
+        apply_city_preset(CONTROLS)
+        if CONTROLS.get("area_log_summary"):
+            print(f"[Runner] All-cities mode: computing Area Insights for {city}")
+        rows: List[List[Any]] = []
+        if CONTROLS.get("area_insights_enable"):
+            rows = compute_area_insights_rows(values)
+        prepared_rows_by_city[city] = rows
+    # Now write sequentially per city
+    for city in city_names:
+        tab_title = CITY_PRESETS.get(city, {}).get("tab", f"{city}_Raw")
+        rows = prepared_rows_by_city.get(city) or []
+        appended = write_rows_to_sheet(values, spreadsheet_id, city, tab_title, rows)
+        counts_by_city[city] = counts_by_city.get(city, 0) + int(appended or 0)
+    # Send one email after all cities (if enabled)
+    if bool(CONTROLS.get("notify_email_after_write_enable")):
+        try:
+            client = authorize_client(values)
+            sh = client.open_by_key(spreadsheet_id)
+            rows_recips = get_recipients(sh, "Recipients")
+            to_emails = CONTROLS.get("notify_email_after_write_to_emails") or [r.get("email_address") for r in rows_recips if r.get("email_address")]
+        except Exception as e:
+            print(f"[Notify] Failed to read recipients: {e}", file=sys.stderr)
+            to_emails = []
+        if to_emails:
+            sheet_link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+            api_key = values.get("SENDGRID_API_KEY") or ""
+            from_email = values.get("FROM_EMAIL") or ""
+            if not api_key or not from_email:
+                print("[Notify] Missing SENDGRID_API_KEY or FROM_EMAIL in .env; skipping email.")
+            else:
+                # Map counts to expected template keys
+                mapped_counts = {
+                    "Chattanooga": counts_by_city.get("Chattanooga", 0),
+                    "Medellin": counts_by_city.get("Medellin", 0),
+                    "Santa Cruz": counts_by_city.get("Santa Cruz", 0),
+                }
+                try:
+                    send_weekly_summary_email(
+                        api_key=api_key,
+                        from_email=from_email,
+                        to_emails=to_emails,
+                        counts=mapped_counts,
+                        sheet_link=sheet_link,
+                    )
+                    print(f"[Notify] Sent summary email to {len(to_emails)} recipient(s).")
+                except Exception as e:
+                    print(f"[Notify] Failed to send email: {e}", file=sys.stderr)
 
 
 def main() -> None:
@@ -327,30 +298,17 @@ def main() -> None:
         print("Missing SPREADSHEET_ID in .env", file=sys.stderr)
         sys.exit(1)
 
-    # Optional: run for all configured cities, writing to each city's *_Raw tab
+    # Optional: run for all configured cities, compute first, then write once per city
     if bool(CONTROLS.get("cities_run_all")):
-        city_names = CONTROLS.get("cities_list") or list(CITY_PRESETS.keys())
-        for city in city_names:
-            CONTROLS["city_name"] = city
-            apply_city_preset(CONTROLS)
-            assert_raw_tab_or_exit(CONTROLS["raw_tab_default"])
-            if CONTROLS.get("area_log_summary"):
-                print(f"[Runner] All-cities mode: running Area Insights for {city} → tab={CONTROLS['raw_tab_default']}")
-            if CONTROLS.get("area_insights_enable"):
-                run_area_insights(values)
+        run_all_cities(values, spreadsheet_id)
         return
 
-    # Single-city mode (default): apply preset and optionally override tab via .env RAW_TAB
+    # Single-city mode: apply preset and optionally override tab via .env RAW_TAB
     apply_city_preset(CONTROLS)
 
     authorize_client(values)
 
     worksheet_title = (values.get("RAW_TAB") or CONTROLS["raw_tab_default"]).strip()
-    assert_raw_tab_or_exit(worksheet_title)
-
-    if CONTROLS.get("area_insights_enable"):
-        run_area_insights(values)
-
     # Optional: isolated email test
     if bool(CONTROLS.get("notify_email_test_enable")):
         try:

@@ -189,6 +189,206 @@ def area_insights_compute(values: Dict[str, str],
     return data
 
 
+
+def _parse_count_value(count_data: Dict[str, Any]) -> int:
+    """Safely parse the 'count' field from an Area Insights response into an int."""
+    count_str = count_data.get("count") or "0"
+    try:
+        return int(count_str)
+    except Exception:
+        return 0
+
+
+def _area_count_for_types(values: Dict[str, str],
+                          location_filter: Dict[str, Any],
+                          types: List[str],
+                          operating_status: List[str] | None) -> Dict[str, Any]:
+    return area_insights_compute(
+        values,
+        insights=["INSIGHT_COUNT"],
+        location_filter=location_filter,
+        type_filter={"includedTypes": types} if types else None,
+        operating_status=operating_status,
+    )
+
+
+def _area_places_for_types(values: Dict[str, str],
+                           location_filter: Dict[str, Any],
+                           types: List[str],
+                           operating_status: List[str] | None) -> Dict[str, Any]:
+    return area_insights_compute(
+        values,
+        insights=["INSIGHT_PLACES"],
+        location_filter=location_filter,
+        type_filter={"includedTypes": types} if types else None,
+        operating_status=operating_status,
+    )
+
+
+def find_place_insights_under_cap(values: Dict[str, str],
+                                  location_filter: Dict[str, Any],
+                                  included_types: List[str],
+                                  operating_status: List[str] | None,
+                                  max_per: int) -> List[Dict[str, Any]]:
+    """Return placeInsights for a given type list, ensuring count <= max_per.
+
+    Strategy:
+    - Compute count for the full list. If <= max_per, fetch places and return.
+    - If count exceeds cap, iteratively reduce the working list by half and retry.
+    - When reduced to a single type that still exceeds the cap, optionally skip
+      or attempt single-type fallbacks across the original order (controlled by CONTROLS).
+    - Returns an empty list on errors or when no subset fits under the cap.
+    """
+    working_types: List[str] = list(included_types or [])
+    original_types: List[str] = list(working_types)
+    place_insights: List[Dict[str, Any]] = []
+    fetched = False
+
+    while working_types and not fetched:
+        # 1) Count for current set of types
+        count_data = _area_count_for_types(values, location_filter, working_types, operating_status)
+        if "_error" in count_data:
+            err = count_data["_error"]
+            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
+            break
+        count_val = _parse_count_value(count_data)
+        if CONTROLS.get("area_log_summary"):
+            print(f"[AreaInsights][Count] types={working_types} count={count_val}")
+
+        if count_val == 0:
+            # Nothing for this set; stop
+            break
+
+        if count_val <= max_per:
+            # 2) Fetch places for this set
+            data = _area_places_for_types(values, location_filter, working_types, operating_status)
+            if "_error" in data:
+                err = data["_error"]
+                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
+                break
+            place_insights = data.get("placeInsights") or []
+            if CONTROLS.get("area_log_summary"):
+                print(f"[AreaInsights][Places] returned={len(place_insights)} for types={working_types}")
+            fetched = True
+            break
+
+        # count_val > max_per → reduce or fallback
+        if len(working_types) == 1:
+            if CONTROLS.get("area_skip_large_single_type", True):
+                if CONTROLS.get("area_log_summary"):
+                    print(f"[AreaInsights][Count] single type {working_types[0]} exceeds {max_per}; skipping fetch")
+                # Try fallback if enabled: iterate over remaining single types in original order
+                if CONTROLS.get("area_enable_single_type_fallback"):
+                    if CONTROLS.get("area_log_summary"):
+                        print("[AreaInsights][Count] Trying next available single-type fallbacks")
+                    for t in original_types:
+                        if t == working_types[0]:
+                            continue
+                        fb_count = _area_count_for_types(values, location_filter, [t], operating_status)
+                        if "_error" in fb_count:
+                            err = fb_count["_error"]
+                            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
+                            continue
+                        fb_val = _parse_count_value(fb_count)
+                        if CONTROLS.get("area_log_summary"):
+                            print(f"[AreaInsights][Count] types={[t]} count={fb_val}")
+                        if fb_val == 0:
+                            continue
+                        if fb_val <= max_per:
+                            data = _area_places_for_types(values, location_filter, [t], operating_status)
+                            if "_error" in data:
+                                err = data["_error"]
+                                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
+                                continue
+                            place_insights = data.get("placeInsights") or []
+                            if CONTROLS.get("area_log_summary"):
+                                print(f"[AreaInsights][Places] returned={len(place_insights)} for types={[t]}")
+                            fetched = True
+                            break
+                        else:
+                            if CONTROLS.get("area_log_summary"):
+                                print(f"[AreaInsights][Count] single type {t} exceeds {max_per}; skipping fetch")
+                break
+            # If not skipping large single type, we would have fetched above; fall through
+
+        # Drop half of the types (last half) and retry
+        drop_n = max(1, len(working_types) // 2)
+        working_types = working_types[:-drop_n]
+        if CONTROLS.get("area_log_summary"):
+            print(f"[AreaInsights][Count] Reducing types; retry with {working_types}")
+
+    return place_insights
+
+
+def gather_all_under_cap_across_types(values: Dict[str, str],
+                                      location_filter: Dict[str, Any],
+                                      included_types: List[str],
+                                      operating_status: List[str] | None,
+                                      max_per: int) -> List[Dict[str, Any]]:
+    """Accumulate placeInsights by scanning each single type and adding all batches
+    whose count <= max_per. Deduplicates by place resource. Stops once the
+    aggregated list reaches the overall max configured in CONTROLS.
+
+    Notes:
+    - Skips types with count == 0
+    - Skips types with count > max_per (honors area_skip_large_single_type semantics)
+    - Prints concise logs when area_log_summary is enabled
+    """
+    aggregated: List[Dict[str, Any]] = []
+    seen_places: set[str] = set()
+    overall_limit = int(CONTROLS.get("area_insights_overall_max", 500))
+
+    if CONTROLS.get("area_log_summary"):
+        print(f"[AreaInsights][GatherAll] Start types={included_types} max_per={max_per} overall_limit={overall_limit}")
+
+    for t in included_types:
+        # Count per single type
+        count_data = _area_count_for_types(values, location_filter, [t], operating_status)
+        if "_error" in count_data:
+            err = count_data["_error"]
+            print(f"[AreaInsights][Count][Error] status={err['status']} body={err['body']}")
+            continue
+        count_val = _parse_count_value(count_data)
+        if CONTROLS.get("area_log_summary"):
+            print(f"[AreaInsights][Count] types={[t]} count={count_val}")
+
+        if count_val == 0:
+            continue
+
+        if count_val <= max_per:
+            data = _area_places_for_types(values, location_filter, [t], operating_status)
+            if "_error" in data:
+                err = data["_error"]
+                print(f"[AreaInsights][Places][Error] status={err['status']} body={err['body']}")
+                continue
+            places = data.get("placeInsights") or []
+            added_here = 0
+            for pi in places:
+                place_resource = pi.get("place")
+                if not place_resource:
+                    continue
+                if place_resource in seen_places:
+                    continue
+                seen_places.add(place_resource)
+                aggregated.append(pi)
+                added_here += 1
+                if len(aggregated) >= overall_limit:
+                    break
+            if CONTROLS.get("area_log_summary"):
+                print(f"[AreaInsights][Places] returned={len(places)} for types={[t]} added={added_here} total={len(aggregated)}")
+            if len(aggregated) >= overall_limit:
+                if CONTROLS.get("area_log_summary"):
+                    print(f"[AreaInsights][GatherAll] Reached overall limit {overall_limit}; stopping")
+                break
+        else:
+            if CONTROLS.get("area_log_summary"):
+                print(f"[AreaInsights][Count] single type {t} exceeds {max_per}; skipping fetch")
+
+    if CONTROLS.get("area_log_summary"):
+        print(f"[AreaInsights][GatherAll] Finished total={len(aggregated)} unique places")
+    return aggregated
+
+
 def map_place_to_row(place: Dict[str, Any], keyword: str | None, grid_lat: float | None, grid_lng: float | None) -> List[Any]:
     loc = (place.get("location") or {})
     lat = loc.get("latitude")
